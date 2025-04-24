@@ -1,0 +1,40 @@
+<!DOCTYPE html><html><head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ESP32 Smart Home v2</title>
+    <style>
+      body { font-family: sans-serif; text-align: center; margin-top: 30px; }
+      .channel { margin: 20px; }
+      .channels_title { margin: 20px; display: inline-block; position: relative; }
+      #channels { display: flex; flex-wrap: wrap; justify-content: center;}
+      .switch {position: relative; display:grid; width: 96px; height: 34px} 
+      .switch input {display: none}
+      .slider {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ff0000; border-radius: 6px}
+      .slider:before {position: absolute; content: ""; height: 20px; width: 30px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 3px}
+      input:checked+.slider {background-color: #3cff00}
+      input:checked+.slider:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px)}
+    </style>
+  </head><body>
+    <h2>ESP32 Smart Home v2</h2>
+    <div class="channels_title"><h3>Light Control</h3></div>
+    <div id="channels">
+      <div class="channel" id="channel0">Light 1: <span id="state0">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(0)" id="switch0"><span class="slider"></span></label></div>
+      <div class="channel" id="channel1">Light 2: <span id="state1">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(1)" id="switch1"><span class="slider"></span></label></div>
+      <div class="channel" id="channel2">Light 3: <span id="state2">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(2)" id="switch2"><span class="slider"></span></label></div>
+      <div class="channel" id="channel3">Light 4: <span id="state3">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(3)" id="switch3"><span class="slider"></span></label></div>
+    </div>
+  <script defer>
+  function toggle(ch) {
+    fetch("/toggle?ch=" + ch);
+  }
+  if (!!window.EventSource) {
+    const sourceEvents = new EventSource('/events');
+    sourceEvents.addEventListener("update", function(e) {
+      const [ch, state] = e.data.split(":");
+      var index = ch.replace("ch", "");
+
+      document.getElementById("state" + index).textContent = state;
+      document.getElementById("switch" + index).checked = state === 'ON' ? true : false;
+    }, false);
+  }
+  </script>
+  </body></html>
