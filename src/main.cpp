@@ -1,13 +1,10 @@
-// #include <stdio.h>
-#include <Arduino.h>
-// #include "esp_log.h"
-// #include "esp_wifi.h"
+#include <HtmlToString.h>
 #ifdef ESP32
 #include <WiFi.h>
 #include <AsyncTCP.h>
-#elif defined(ESP8266)
-#include <ESP8266WiFi.h>
-#include <ESPAsyncTCP.h>
+// #elif defined(ESP8266)
+// #include <ESP8266WiFi.h>
+// #include <ESPAsyncTCP.h>
 #endif
 #include <ESPAsyncWebServer.h>
 #include <PubSubClient.h>
@@ -16,22 +13,19 @@
 #include "freertos/task.h"
 #include <credentials.h>
 
-// #define TAG "main"
-
 // WiFi and MQTT
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_PASSWORD;
-
 const char *mqtt_server = HIVEMQ_MQTT_SERVER; // using HiveMQ Cloud
 const char *mqtt_username = HIVEMQ_MQTT_USERNAME;
 const char *mqtt_password = HIVEMQ_MQTT_PASSWORD;
 const int mqtt_port = 8883;
 
 // GPIOs
-const int ledPins[] = {27, 26, 25, 32};
-const int buttonPins[] = {14, 12, 13, 33};
-const String deviceName[] = {"Luz Cozinha", "Luz Lavanderia", "Luz Quintal", "Luz Quarto Fabio"};
 const int NUM_CHANNELS = 4;
+const int ledPins[] = {23, 22, 21, 19};
+const int buttonPins[] = {34, 35, 32, 33};
+// const String deviceName[] = {"Luz Cozinha", "Luz Lavanderia", "Luz Quintal", "Luz Quarto Fabio"}; // for now not used yet
 bool lightStates[NUM_CHANNELS] = {false, false, false, false};
 bool lastButtonStates[NUM_CHANNELS] = {HIGH, HIGH, HIGH, HIGH};
 bool mqttOnline = false;
@@ -47,9 +41,11 @@ PubSubClient mqttClient(espClient);
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
 
-IPAddress local_IP(192, 168, 0, 192); // Defina o IP de acordo com a sua rede
+IPAddress local_IP(192, 168, 0, 222); // Defina o IP de acordo com a sua rede
 IPAddress gateway(192, 168, 0, 1);
 IPAddress subnet(255, 255, 0, 0);
+IPAddress primaryDNS(8, 8, 8, 8);   // optional
+IPAddress secondaryDNS(8, 8, 4, 4); // optional
 
 // Tasks
 TaskHandle_t TaskButtonsHandle, TaskMQTTHandle;
@@ -231,42 +227,6 @@ const char index_html[] PROGMEM = R"rawliteral(
   </body></html>
 )rawliteral";
 
-// const char index_html[] PROGMEM = R"rawliteral(
-// <!DOCTYPE html><html><head>
-//   <meta name="viewport" content="width=device-width, initial-scale=1">
-//   <title>ESP32 Light Control</title>
-//   <style>
-//     body { font-family: sans-serif; text-align: center; margin-top: 30px; }
-//     .channel { margin: 20px; }
-//     button {
-//       font-size: 1.5em; padding: 10px 30px;
-//       background: #4CAF50; color: white;
-//       border: none; border-radius: 8px;
-//     }
-//   </style>
-// </head><body>
-//   <h2>ESP32 Multi Light Control</h2>
-//   <div id="channels">
-//     <div class="channel">Light 1: <span id="state0">--</span> <button onclick="toggle(0)">Toggle</button></div>
-//     <div class="channel">Light 2: <span id="state1">--</span> <button onclick="toggle(1)">Toggle</button></div>
-//     <div class="channel">Light 3: <span id="state2">--</span> <button onclick="toggle(2)">Toggle</button></div>
-//     <div class="channel">Light 4: <span id="state3">--</span> <button onclick="toggle(3)">Toggle</button></div>
-//   </div>
-// <script>
-// function toggle(ch) {
-//   fetch("/toggle?ch=" + ch);
-// }
-// if (!!window.EventSource) {
-//   const source = new EventSource('/events');
-//   source.addEventListener("update", function(e) {
-//     const [ch, state] = e.data.split(":");
-//     document.getElementById("state" + ch.replace("ch", "")).textContent = state;
-//   }, false);
-// }
-// </script>
-// </body></html>
-// )rawliteral";
-
 // ========= Setup =========
 void setup()
 {
@@ -282,7 +242,6 @@ void setup()
 
   xTaskCreatePinnedToCore(TaskButtons, "TaskButtons", 4096, NULL, 1, &TaskButtonsHandle, 1);
   xTaskCreatePinnedToCore(TaskMQTT, "TaskMQTT", 8192, NULL, 1, &TaskMQTTHandle, 1);
-  // xTaskCreatePinnedToCore(TaskWeb, "TaskWeb", 4096, NULL, 1, &TaskWebHandle, 1);
 }
 
 void setupLights()
@@ -297,6 +256,11 @@ void setupLights()
 
 void setupWifi()
 {
+  // Configures static IP address
+  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
+  {
+    Serial.println("STA Failed to configure");
+  }
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED)
@@ -317,25 +281,26 @@ void setupMqtt()
 void asyncWebServerRoutes()
 {
   // Async Web Server Routes
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-            { request->send_P(200, "text/html", index_html); });
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", index_html);
+  });
 
-  server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      if (request->hasParam("ch")) {
-        int ch = request->getParam("ch")->value().toInt();
-        if (ch >= 0 && ch < NUM_CHANNELS) toggleLight(ch);
-      }
-      
-      request->send(200, "text/plain", "OK"); });
+  server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("ch")) {
+      int ch = request->getParam("ch")->value().toInt();
+      if (ch >= 0 && ch < NUM_CHANNELS) toggleLight(ch);
+    }
+    
+    request->send(200, "text/plain", "OK");
+  });
 
-  events.onConnect([](AsyncEventSourceClient *client)
-                   {
-        for (int i = 0; i < NUM_CHANNELS; i++) {
-          char msg[20];
-          sprintf(msg, "ch%d:%s", i, lightStates[i] ? "ON" : "OFF");
-          client->send(msg, "update", millis());
-        } });
+  events.onConnect([](AsyncEventSourceClient *client) {
+    for (int i = 0; i < NUM_CHANNELS; i++) {
+      char msg[20];
+      sprintf(msg, "ch%d:%s", i, lightStates[i] ? "ON" : "OFF");
+      client->send(msg, "update", millis());
+    }
+  });
 
   server.addHandler(&events);
   server.begin();
