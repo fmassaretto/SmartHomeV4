@@ -27,18 +27,57 @@ const char *mqtt_username     = HIVEMQ_MQTT_USERNAME;
 const char *mqtt_password     = HIVEMQ_MQTT_PASSWORD;
 const int mqtt_port           = 8883;
 
-// GPIOs
-const int NUM_CHANNELS = 4;
-const int lightPins[] = {23, 22, 21, 19};
-const int buttonPins[] = {32, 33, 25, 26};
-// const String deviceName[] = {"Luz Cozinha", "Luz Lavanderia", "Luz Quintal", "Luz Quarto Fabio"}; // for now not used yet
-bool lightStates[NUM_CHANNELS] = {false, false, false, false};
-bool lastButtonStates[NUM_CHANNELS] = {LOW, LOW, LOW, LOW};
+struct MapDevice{
+  int channel;
+  std::vector<int> inputPins;
+  std::vector<int> outputPins;
+  std::vector<bool> inputState;
+  std::vector<bool> outputState;
+  std::string name;
+};
+
 bool mqttOnline = false;
 
+// Initialize with pin numbers; state vectors must match size
+std::vector<MapDevice> devices = {
+  {
+    0,            // channel
+    {32},         // input pins
+    {23},         // output pins
+    {false},      // initial input states
+    {HIGH},       // initial output states HIGH = OFF
+    "Luz_Cozinha" // Device name
+  },
+  {
+    1,
+    {33},
+    {22},
+    {false},
+    {HIGH},
+    "Luz_Lavanderia"
+  },
+  {
+    2,
+    {25},
+    {21},
+    {false},
+    {HIGH},
+    "Luz_Corredor_Quintal"
+  },
+  {
+    3,
+    {26, 27},
+    {19},
+    {false, false},
+    {HIGH},
+    "Luz_Quarto_Fabio"
+  }
+};
+
 // Topics
-const char *control_topic = "home/light/control";
-const char *command_topic = "home/light/command";
+const char *control_topic = "home/channel%d/control";
+const char *command_topic = "home/channel%d/command";
+const char *state_topic = "home/channel%d/state";
 
 // Globals
 WiFiClientSecure espClient;
@@ -55,45 +94,47 @@ IPAddress secondaryDNS(8, 8, 4, 4); // optional
 // Tasks
 TaskHandle_t TaskButtonsHandle, TaskMQTTHandle;
 
-void toggleLight(int index, bool newState)
-{
-  lightStates[index] = newState;
-  digitalWrite(lightPins[index], newState ? HIGH : LOW);
-  char topic[64], payload[8];
-  sprintf(topic, "home/light%d/state", index);
-  sprintf(payload, newState ? "OFF" : "ON");
-  if (mqttOnline)
-    mqttClient.publish(topic, payload);
+void toggleDevice(MapDevice& device, bool newState) {
+    device.outputState[0] = newState;
+    digitalWrite(device.outputPins[0], newState ? LOW : HIGH);
 
-  sprintf(topic, "ch%d:%s", index, newState ? "OFF" : "ON");
-  events.send(topic, "update", millis());
+    char topicState[64], topicControl[64];
+    char payload[8];
+    int channel = device.channel;
+    String status = newState ? "ON" : "OFF";
+
+    sprintf(topicState, state_topic, channel);
+    sprintf(topicControl, control_topic, channel);
+    sprintf(payload, status.c_str());
+
+    if (mqttOnline) {
+      mqttClient.publish(topicState, payload);
+      mqttClient.publish(topicControl, payload);
+    }
+
+    sprintf(topicState, "ch%d:%s", device.channel, status); // TBD: may change to device.name instead of ch(channel)
+    events.send(topicState, "update", millis());
 }
 
-void toggleLight(int index)
-{
-  toggleLight(index, !lightStates[index]);
-  if (mqttOnline)
-  {
-    char topic[64], payload[8];
-    sprintf(topic, "home/light%d/control", index);
-    sprintf(payload, lightStates[index] ? "OFF" : "ON");
-    mqttClient.publish(topic, payload);
-  }
+void toggleDevice(MapDevice& device) {
+  bool newState = !device.outputState[0];
+  toggleDevice(device, newState);
 }
 
-void mqttCallback(char *topic, byte *payload, unsigned int length)
-{
+void mqttCallback(char *topic, byte *payload, unsigned int length) { // Called by externaal MQTT Sender
   String t = String(topic);
   String msg;
-  for (unsigned int i = 0; i < length; i++)
-    msg += (char)payload[i];
+  char topicCommand[32];
 
-  for (int i = 0; i < NUM_CHANNELS; i++)
-  {
-    if (t == "home/light" + String(i) + "/command")
-    {
-      toggleLight(i, msg == "ON");
-    }
+  for (unsigned int i = 0; i < length; i++)
+    msg += (char) payload[i];
+
+    for (auto& device : devices) {
+      sprintf(topicCommand, command_topic, device.channel);
+
+      if (t == topicCommand) {
+        toggleDevice(device, msg == "ON");
+      }
   }
 }
 
@@ -130,24 +171,20 @@ mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----)EOF";
 
-void reconnectMQTT()
-{
-  while (!mqttClient.connected())
-  {
+void reconnectMQTT() {
+  while (!mqttClient.connected()) {
     String client_id = "esp8266-client-" + String(WiFi.macAddress());
 
-    if (mqttClient.connect(client_id.c_str(), mqtt_username, mqtt_password))
-    {
+    if (mqttClient.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
       mqttOnline = true;
       Serial.println("MQTT connected to: " + client_id);
-      for (int i = 0; i < NUM_CHANNELS; i++)
-      {
-        String topic = "home/light" + String(i) + "/command";
-        mqttClient.subscribe(topic.c_str());
+      for (auto& device : devices) {
+        char topicCommand[32];
+        sprintf(topicCommand, command_topic,device.channel);
+
+        mqttClient.subscribe(topicCommand);
       }
-    }
-    else
-    {
+    } else {
       mqttOnline = false;
       Serial.print("Failed to connect to MQTT broker, rc=");
       Serial.println(mqttClient.state());
@@ -157,37 +194,42 @@ void reconnectMQTT()
   }
 }
 
-void TaskMQTT(void *parameter)
-{
-  for (;;)
-  {
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      if (!mqttClient.connected())
+void TaskMQTT(void *parameter) {
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!mqttClient.connected()) {
         reconnectMQTT();
+      }
       mqttClient.loop();
     }
     vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
-void TaskButtons(void *parameter)
-{
-  for (;;)
-  {
-    for (int i = 0; i < NUM_CHANNELS; i++)
-    {
-      bool state = digitalRead(buttonPins[i]);
-      if (state == LOW && lastButtonStates[i] == HIGH)
-      {
-        toggleLight(i);
-        vTaskDelay(50 / portTICK_PERIOD_MS);
+void checkButtons() {
+  for (auto& device : devices) {
+    for (size_t i = 0; i < device.inputPins.size(); i++) {
+      bool currentState = digitalRead(device.inputPins[i]) == HIGH;
+
+      // Trigger only on rising edge
+      if (currentState && !device.inputState[i]) {
+        toggleDevice(device);
       }
-      lastButtonStates[i] = state;
+
+      // Save input state for edge detection
+      device.inputState[i] = currentState;
     }
-    vTaskDelay(20 / portTICK_PERIOD_MS);
   }
 }
+
+void TaskButtons(void *parameter)
+{
+  while (true) {
+    checkButtons();
+    vTaskDelay(pdMS_TO_TICKS(30)); // debounce and CPU friendly
+  }
+}
+
 // const String index_file = htmlFileToString("index.html"); // to be tested; TODO: in future move all website to an external server outside the esp
 const char index_html[] PROGMEM = R"rawliteral(
  <!DOCTYPE html><html><head>
@@ -258,12 +300,25 @@ const char index_html[] PROGMEM = R"rawliteral(
   </body></html>
 )rawliteral";
 
+void setupPins() {
+  for (auto& device : devices) {
+    for (int in : device.inputPins) {
+      pinMode(in, INPUT_PULLUP);
+    }
+    for (size_t i = 0; i < device.outputPins.size(); i++) {
+      pinMode(device.outputPins[i], OUTPUT);
+      digitalWrite(device.outputPins[i], HIGH);  // HIGH = OFF by default
+      device.outputState[i] = false;
+    }
+  }
+}
+
 // ========= Setup =========
 void setup()
 {
   Serial.begin(115200);
 
-  setupLights();
+  setupPins();
 
   setupWifi();
 
@@ -275,19 +330,16 @@ void setup()
   xTaskCreatePinnedToCore(TaskMQTT, "TaskMQTT", 8192, NULL, 1, &TaskMQTTHandle, 1);
 }
 
-void setupLights()
-{
-  for (int i = 0; i < NUM_CHANNELS; i++)
-  {
-    int lightIdx = lightPins[i];
-    pinMode(lightIdx, OUTPUT);
-    pinMode(buttonPins[i], INPUT_PULLUP);
-    digitalWrite(lightIdx, HIGH);
+MapDevice& findDeviceByChannel(int channel){
+  for (auto& device : devices) {
+    if(device.channel == channel) {
+      return device;
+    }
   }
+  throw std::runtime_error("Object not found");
 }
 
-void setupWifi()
-{
+void setupWifi() {
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
   // Configures static IP address
@@ -320,16 +372,14 @@ void setupWifi()
   else Serial.println("Error! MDNS not started.");
 }
 
-void setupMqtt()
-{
+void setupMqtt() {
   espClient.setCACert(root_ca);
 
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
 }
 
-void asyncWebServerRoutes()
-{
+void asyncWebServerRoutes() {
   // Async Web Server Routes
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", index_html);
@@ -338,17 +388,24 @@ void asyncWebServerRoutes()
   server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (request->hasParam("ch")) {
       int ch = request->getParam("ch")->value().toInt();
-      if (ch >= 0 && ch < NUM_CHANNELS) toggleLight(ch);
+
+      if(ch >= 0 && ch < devices.size()) {
+        MapDevice& mapDevice = findDeviceByChannel(ch);
+
+        toggleDevice(mapDevice);
+      }
     }
     
     request->send(200, "text/plain", "OK");
   });
 
   events.onConnect([](AsyncEventSourceClient *client) {
-    for (int i = 0; i < NUM_CHANNELS; i++) {
-      char msg[20];
-      sprintf(msg, "ch%d:%s", i, lightStates[i] ? "ON" : "OFF");
-      client->send(msg, "update", millis());
+    for (auto& device : devices) {
+      for (size_t j = 0; j < device.outputState.size(); j++) {
+        char msg[20];
+        sprintf(msg, "ch%d:%s", device.channel, device.outputState[j] ? "ON" : "OFF");
+        client->send(msg, "update", millis());
+      }
     }
   });
 
