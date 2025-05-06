@@ -2,35 +2,61 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>ESP32 Smart Home v2</title>
     <style>
-      body { font-family: sans-serif; text-align: center; margin-top: 30px; }
-      .channel { margin: 20px; }
-      .channels_title { margin: 20px; display: inline-block; position: relative; }
-      #channels { display: flex; flex-wrap: wrap; justify-content: center;}
-      .switch {position: relative; display:grid; width: 96px; height: 34px} 
-      .switch input {display: none}
-      .slider {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ff0000; border-radius: 6px}
-      .slider:before {position: absolute; content: ""; height: 20px; width: 30px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 3px}
-      input:checked+.slider {background-color: #3cff00}
-      input:checked+.slider:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px)}
+      body {font-family: sans-serif; text-align: center; margin-top: 30px;}
+      .channel {display:flex; flex-direction: column; width: 150px; margin: 10px;}
+      #channels {display: flex; flex-wrap: wrap; justify-content: center;}
+      .switch {position: relative; display:inline-block; width: 60px; height: 34px; left: 30%;} 
+      #enable_channels_input {width: 100px; margin-right: 10px;}
+
+      input:disabled+.slider {background-color: #ccc;}
+      .slider {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ff0000; transition:.4s;}
+      .slider:before {position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: #fff; -webkit-transition: .4s; transition: .4s;}
+      input:checked+.slider {background-color: #66bb6a}
+      input:checked+.slider:before {-webkit-transform: translateX(26px); transform: translateX(26px)}
+      .slider.round {border-radius: 34px;}
+      .slider.round:before {border-radius: 50%;}
     </style>
   </head><body>
     <h2>ESP32 Smart Home v2</h2>
-    <div class="channels_title"><h3>Light Control</h3></div>
+    <div class="enable-channels"><span>Enable all channels password: </span><input type="text" name="enable_channels_input" id="enable_channels_input"><input type="button" value="Send" onclick="enable_channels()"/></div>
+    <div class="channels_title"><h3>Controle das Luzes</h3></div>
     <div id="channels">
-      <div class="channel" id="channel0">Light 1: <span id="state0">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(0)" id="switch0"><span class="slider"></span></label></div>
-      <div class="channel" id="channel1">Light 2: <span id="state1">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(1)" id="switch1"><span class="slider"></span></label></div>
-      <div class="channel" id="channel2">Light 3: <span id="state2">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(2)" id="switch2"><span class="slider"></span></label></div>
-      <div class="channel" id="channel3">Light 4: <span id="state3">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(3)" id="switch3"><span class="slider"></span></label></div>
+      <div class="channel">Cozinha: <span id="state0">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(0)" class="toggle" id="switch0"> <div class="slider round"></div></label></div>
+      <div class="channel">Lavanderia: <span id="state1">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(1)" class="toggle" id="switch1"> <div class="slider round"></div></label></div>
+      <div class="channel">Corredor Quintal: <span id="state2">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(2)" class="toggle" id="switch2"> <div class="slider round"></div></label></div>
+      <div class="channel">Quarto do Fabio: <span id="state3">--</span> <label class="switch"> <input type="checkbox" onchange="toggle(3)" class="toggle" id="switch3" disabled> <div class="slider round"></div></label></div>
     </div>
   <script defer>
+    window.onload = resetAllToggles();
+    var bedroomSwitch = document.getElementById("switch3");
+
   function toggle(ch) {
     fetch("/toggle?ch=" + ch);
   }
+
+  function enable_channels(){
+    var password = document.getElementById("enable_channels_input");
+
+    if (password.value === "lmi56n") {
+      
+      bedroomSwitch.removeAttribute("disabled");
+      alert("All channels are enabled");
+    }
+  }
+
+  function resetAllToggles() {
+    document.getElementsByClassName("toggle").checked = false;
+  }
+
   if (!!window.EventSource) {
     const sourceEvents = new EventSource('/events');
     sourceEvents.addEventListener("update", function(e) {
       const [ch, state] = e.data.split(":");
       var index = ch.replace("ch", "");
+
+      if(index == "3" && bedroomSwitch.hasAttribute("disabled")) {
+        return;
+      }
 
       document.getElementById("state" + index).textContent = state;
       document.getElementById("switch" + index).checked = state === 'ON' ? true : false;
