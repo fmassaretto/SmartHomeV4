@@ -2,11 +2,12 @@
 #ifndef HTMLTOSTRING_H_
 #define HTMLTOSTRING_H_
 
+#include "Arduino.h"
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <sstream>
 
-std::string htmlFileToString(const std::string& filePath);
+String htmlFileToString(const std::string& filePath);
 
 #endif
