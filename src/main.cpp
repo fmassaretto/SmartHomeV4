@@ -5,6 +5,7 @@
 #endif
 #include <ESPAsyncWebServer.h>
 #include <WiFiClientSecure.h>
+// #include <HTTPClient.h> // TODO: access external API
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <ESPmDNS.h>
@@ -36,14 +37,14 @@ struct MapDevice{
 // Initialize with pin numbers; state vectors must match size
 std::vector<MapDevice> devices = {
   {
-    0,
-    {32},                // input pins
-    {23},                // output pins
-    {false},             // inputState
-    {0},                 // lastDebounceTime
-    {HIGH},              // lastButtonState (with INPUT_PULLUP, not pressed = HIGH)
-    {false},             // outputState (false = OFF)
-    "Luz_Cozinha"
+    0,                   // device channel
+    {32},                // input pin(s): 1 or more buttons/sensor/switch to control the output
+    {23},                // output pin(s): 1 or more output can be controlled by the input
+    {false},             // initial input state(s): state of each input pin
+    {0},                 // last debounce time of each input
+    {HIGH},              // last input state of each input (with INPUT_PULLUP, not pressed = HIGH)
+    {false},             // output state of each output (false = OFF)
+    "Luz_Cozinha"        // device's name
   },
   {
     1,
@@ -57,8 +58,8 @@ std::vector<MapDevice> devices = {
   },
   {
     2,
-    {25},
-    {21},
+    {25},                // one switch for same light
+    {21},                // one light
     {false},
     {0},
     {HIGH},
@@ -68,11 +69,11 @@ std::vector<MapDevice> devices = {
   {
     3,
     {26, 27},            // two switches for same light
-    {19},
-    {false, false},      // inputState
-    {0, 0},              // lastDebounceTime
-    {HIGH, HIGH},        // lastButtonState
-    {false},             // outputState
+    {19},                // one light
+    {false, false},
+    {0, 0},
+    {HIGH, HIGH},
+    {false},
     "Luz_Quarto_Fabio"
   }
 };
@@ -158,7 +159,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     var bedroomSwitch = document.getElementById("switch3");
 
   function toggle(ch) {
-    fetch("/toggle?channel=" + ch);
+    fetch("/toggle?channel=" + ch, {method: "POST"});
   }
 
   function enable_channels(){
@@ -269,6 +270,36 @@ void setupWifi() {
   }
 }
 
+// String httpGETRequest(const char* serverName) {
+//   HTTPClient http;
+
+//   // Your IP address with path or Domain name with URL path 
+//   http.begin(serverName);
+
+//   // If you need Node-RED/server authentication, insert user and password below
+//   //http.setAuthorization("REPLACE_WITH_SERVER_USERNAME", "REPLACE_WITH_SERVER_PASSWORD");
+
+
+//   // Send HTTP POST request
+//   int httpResponseCode = http.GET();
+
+//   String payload = "{}"; 
+
+//   if (httpResponseCode>0) {
+//     Serial.print("HTTP Response code: ");
+//     Serial.println(httpResponseCode);
+//     payload = http.getString();
+//   }
+//   else {
+//     Serial.print("Error code: ");
+//     Serial.println(httpResponseCode);
+//   }
+//   // Free resources
+//   http.end();
+
+//   return payload;
+// }
+
 void asyncWebServerRoutes() {
   // Async Web Server Routes
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -284,8 +315,8 @@ void asyncWebServerRoutes() {
 
         toggleDevice(mapDevice);
 
-        String msg = "The device channel: " + String(mapDevice.channel) + " has been changed its state to: " + mapDevice.outputState[0] ? "ON" : "OFF";
-        
+        String msg = "The device channel: " + String(mapDevice.channel) + " has been changed its state to: " + (mapDevice.outputState[0] ? "ON" : "OFF");
+
         request->send(200, "text/plain", msg);
       } else {
         request->send(404, "text/plain", "Device not found");
@@ -305,7 +336,7 @@ void asyncWebServerRoutes() {
     }
   });
 
- server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request){
+ server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request) {
     String json = "[";
     for(int i=0; i<devices.size(); i++){
       json += "{\"channel\":" + String(devices[i].channel) + ",\"name\":\"" + devices[i].name.c_str() + "\",\"outputState\":" + (devices[i].outputState[0] ? "true" : "false") + "}";
@@ -318,7 +349,13 @@ void asyncWebServerRoutes() {
     request->send(200, "application/json", json);
   });
 
-  server.on("/api/device/toggle", HTTP_POST, [](AsyncWebServerRequest *request){
+//  server.on("/api/viacep", HTTP_GET, [](AsyncWebServerRequest *request) {
+//     String json = httpGETRequest("https://viacep.com.br/ws/01001000/json/");
+    
+//     request->send(200, "application/json", json);
+//   });
+
+  server.on("/api/device/toggle", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (request->hasParam("channel") && request->hasParam("state")) {
       int channel = request->getParam("channel")->value().toInt();
       bool state = request->getParam("state")->value().equalsIgnoreCase("true");
@@ -338,7 +375,7 @@ void asyncWebServerRoutes() {
     }
   });
 
-  Serial.println("Rest API Ready");
+  Serial.println("Rest API is Ready");
 
   server.addHandler(&events);
   server.begin();
