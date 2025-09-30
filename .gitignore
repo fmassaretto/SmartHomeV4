@@ -1,4 +1,4 @@
 .pio
 .vscode/*
 
-src/credentials.h
+include/credentials.h

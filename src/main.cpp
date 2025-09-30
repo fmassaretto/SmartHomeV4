@@ -2,16 +2,13 @@
 #ifdef ESP32
   #include <WiFi.h>
   #include <AsyncTCP.h>
-// #elif defined(ESP8266)
-// #include <ESP8266WiFi.h>
-// #include <ESPAsyncTCP.h>
 #endif
 #include <ESPAsyncWebServer.h>
-#include <PubSubClient.h>
 #include <WiFiClientSecure.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <ESPmDNS.h>
+#include <ArduinoOTA.h>
 #include <credentials.h>
 
 // WiFi and MQTT
@@ -19,41 +16,43 @@ const char *ssid              = WIFI_SSID;
 const char *password          = WIFI_PASSWORD;
 const char *soft_ap_ssid      = SOFT_AP_SSID;
 const char *soft_ap_password  = SOFT_AP_PASSWORD; // NULL for no password
-const int   channel           = 10;    // WiFi Channel number between 1 and 13
+const int   channel           = 1;    // WiFi Channel number between 1 and 13
 const bool  hide_SSID         = false; // To disable SSID broadcast -> SSID will not appear in a basic WiFi scan
-const int   max_connection    = 2;  
-const char *mqtt_server       = HIVEMQ_MQTT_SERVER; // using HiveMQ Cloud
-const char *mqtt_username     = HIVEMQ_MQTT_USERNAME;
-const char *mqtt_password     = HIVEMQ_MQTT_PASSWORD;
-const int mqtt_port           = 8883;
+const int   max_connection    = 3;
+
+#define DEBOUNCE_DELAY 50 // ms
 
 struct MapDevice{
   int channel;
   std::vector<int> inputPins;
   std::vector<int> outputPins;
   std::vector<bool> inputState;
+  std::vector<unsigned long> lastDebounceTime;
+  std::vector<bool> lastButtonState;
   std::vector<bool> outputState;
   std::string name;
 };
 
-bool mqttOnline = false;
-
 // Initialize with pin numbers; state vectors must match size
 std::vector<MapDevice> devices = {
   {
-    0,            // channel
-    {32},         // input pins
-    {23},         // output pins
-    {false},      // initial input states
-    {HIGH},       // initial output states HIGH = OFF
-    "Luz_Cozinha" // Device name
+    0,
+    {32},                // input pins
+    {23},                // output pins
+    {false},             // inputState
+    {0},                 // lastDebounceTime
+    {HIGH},              // lastButtonState (with INPUT_PULLUP, not pressed = HIGH)
+    {false},             // outputState (false = OFF)
+    "Luz_Cozinha"
   },
   {
     1,
     {33},
     {22},
     {false},
+    {0},
     {HIGH},
+    {false},
     "Luz_Lavanderia"
   },
   {
@@ -61,58 +60,53 @@ std::vector<MapDevice> devices = {
     {25},
     {21},
     {false},
+    {0},
     {HIGH},
+    {false},
     "Luz_Corredor_Quintal"
   },
   {
     3,
-    {26, 27},
+    {26, 27},            // two switches for same light
     {19},
-    {false, false},
-    {HIGH},
+    {false, false},      // inputState
+    {0, 0},              // lastDebounceTime
+    {HIGH, HIGH},        // lastButtonState
+    {false},             // outputState
     "Luz_Quarto_Fabio"
   }
 };
 
-// Topics
-const char *control_topic = "home/channel%d/control";
-const char *command_topic = "home/channel%d/command";
-const char *state_topic = "home/channel%d/state";
-
 // Globals
-WiFiClientSecure espClient;
-PubSubClient mqttClient(espClient);
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
 
-IPAddress local_IP(192, 168, 0, 222); // Defina o IP
+IPAddress local_IP(192, 168, 0, 122); // Defina o IP
 IPAddress gateway(192, 168, 0, 1);
-IPAddress subnet(255, 255, 0, 0);
+IPAddress subnet(255, 255, 255, 0);
 IPAddress primaryDNS(8, 8, 8, 8);   // optional
 IPAddress secondaryDNS(8, 8, 4, 4); // optional
 
 // Tasks
-TaskHandle_t TaskButtonsHandle, TaskMQTTHandle;
+TaskHandle_t TaskButtonsHandle, TaskRestApiHandle;
+
+// Methods declarations
+void checkButtons();
+void setupPins();
+// void setupRestAPI();
 
 void toggleDevice(MapDevice& device, bool newState) {
     device.outputState[0] = newState;
-    digitalWrite(device.outputPins[0], newState ? LOW : HIGH);
+    digitalWrite(device.outputPins[0], newState ? HIGH : LOW);
 
     char topicState[64], topicControl[64];
     char payload[8];
     int channel = device.channel;
     String status = newState ? "ON" : "OFF";
 
-    sprintf(topicState, state_topic, channel);
-    sprintf(topicControl, control_topic, channel);
     sprintf(payload, status.c_str());
 
-    if (mqttOnline) {
-      mqttClient.publish(topicState, payload);
-      mqttClient.publish(topicControl, payload);
-    }
-
-    sprintf(topicState, "ch%d:%s", device.channel, status); // TBD: may change to device.name instead of ch(channel)
+    sprintf(topicState, "channel%d:%s", device.channel, status); // TBD: may change to device.name instead of ch(channel)
     events.send(topicState, "update", millis());
 }
 
@@ -121,112 +115,11 @@ void toggleDevice(MapDevice& device) {
   toggleDevice(device, newState);
 }
 
-void mqttCallback(char *topic, byte *payload, unsigned int length) { // Called by externaal MQTT Sender
-  String t = String(topic);
-  String msg;
-  char topicCommand[32];
-
-  for (unsigned int i = 0; i < length; i++)
-    msg += (char) payload[i];
-
-    for (auto& device : devices) {
-      sprintf(topicCommand, command_topic, device.channel);
-
-      if (t == topicCommand) {
-        toggleDevice(device, msg == "ON");
-      }
-  }
-}
-
-// HiveMQ Cloud Let's Encrypt CA certificate
-static const char *root_ca PROGMEM = R"EOF(-----BEGIN CERTIFICATE-----
-MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
-TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
-cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
-WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
-ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
-MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
-h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
-0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
-A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
-T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
-B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
-B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
-KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
-OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
-jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
-qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
-rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
-HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
-hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
-ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
-3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
-NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
-ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
-TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
-jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
-oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
-4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
-mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
-emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
------END CERTIFICATE-----)EOF";
-
-void reconnectMQTT() {
-  while (!mqttClient.connected()) {
-    String client_id = "esp8266-client-" + String(WiFi.macAddress());
-
-    if (mqttClient.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
-      mqttOnline = true;
-      Serial.println("MQTT connected to: " + client_id);
-      for (auto& device : devices) {
-        char topicCommand[32];
-        sprintf(topicCommand, command_topic,device.channel);
-
-        mqttClient.subscribe(topicCommand);
-      }
-    } else {
-      mqttOnline = false;
-      Serial.print("Failed to connect to MQTT broker, rc=");
-      Serial.println(mqttClient.state());
-
-      delay(5000);
-    }
-  }
-}
-
-void TaskMQTT(void *parameter) {
-  for (;;) {
-    if (WiFi.status() == WL_CONNECTED) {
-      if (!mqttClient.connected()) {
-        reconnectMQTT();
-      }
-      mqttClient.loop();
-    }
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-  }
-}
-
-void checkButtons() {
-  for (auto& device : devices) {
-    for (size_t i = 0; i < device.inputPins.size(); i++) {
-      bool currentState = digitalRead(device.inputPins[i]) == HIGH;
-
-      // Trigger only on rising edge
-      if (currentState && !device.inputState[i]) {
-        toggleDevice(device);
-      }
-
-      // Save input state for edge detection
-      device.inputState[i] = currentState;
-    }
-  }
-}
-
 void TaskButtons(void *parameter)
 {
   while (true) {
     checkButtons();
-    vTaskDelay(pdMS_TO_TICKS(30)); // debounce and CPU friendly
+    vTaskDelay(pdMS_TO_TICKS(30));
   }
 }
 
@@ -234,7 +127,7 @@ void TaskButtons(void *parameter)
 const char index_html[] PROGMEM = R"rawliteral(
  <!DOCTYPE html><html><head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ESP32 Smart Home v2</title>
+    <title>ESP32 Smart Home v4</title>
     <style>
       body {font-family: sans-serif; text-align: center; margin-top: 30px;}
       .channel {display:flex; flex-direction: column; width: 150px; margin: 10px;}
@@ -251,7 +144,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       .slider.round:before {border-radius: 50%;}
     </style>
   </head><body>
-    <h2>ESP32 Smart Home v2</h2>
+    <h2>ESP32 Smart Home v4</h2>
     <div class="enable-channels"><span>Enable all channels password: </span><input type="text" name="enable_channels_input" id="enable_channels_input"><input type="button" value="Send" onclick="enable_channels()"/></div>
     <div class="channels_title"><h3>Controle das Luzes</h3></div>
     <div id="channels">
@@ -265,7 +158,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     var bedroomSwitch = document.getElementById("switch3");
 
   function toggle(ch) {
-    fetch("/toggle?ch=" + ch);
+    fetch("/toggle?channel=" + ch);
   }
 
   function enable_channels(){
@@ -279,14 +172,17 @@ const char index_html[] PROGMEM = R"rawliteral(
   }
 
   function resetAllToggles() {
-    document.getElementsByClassName("toggle").checked = false;
+  const toggles = document.getElementsByClassName("toggle");
+  for (let i = 0; i < toggles.length; i++) {
+    toggles[i].checked = false;
   }
+}
 
   if (!!window.EventSource) {
     const sourceEvents = new EventSource('/events');
     sourceEvents.addEventListener("update", function(e) {
       const [ch, state] = e.data.split(":");
-      var index = ch.replace("ch", "");
+      var index = ch.replace("channel", "");
 
       if(index == "3" && bedroomSwitch.hasAttribute("disabled")) {
         return;
@@ -300,19 +196,6 @@ const char index_html[] PROGMEM = R"rawliteral(
   </body></html>
 )rawliteral";
 
-void setupPins() {
-  for (auto& device : devices) {
-    for (int in : device.inputPins) {
-      pinMode(in, INPUT_PULLUP);
-    }
-    for (size_t i = 0; i < device.outputPins.size(); i++) {
-      pinMode(device.outputPins[i], OUTPUT);
-      digitalWrite(device.outputPins[i], HIGH);  // HIGH = OFF by default
-      device.outputState[i] = false;
-    }
-  }
-}
-
 // ========= Setup =========
 void setup()
 {
@@ -322,12 +205,9 @@ void setup()
 
   setupWifi();
 
-  setupMqtt();
-
   asyncWebServerRoutes();
 
   xTaskCreatePinnedToCore(TaskButtons, "TaskButtons", 4096, NULL, 1, &TaskButtonsHandle, 1);
-  xTaskCreatePinnedToCore(TaskMQTT, "TaskMQTT", 8192, NULL, 1, &TaskMQTTHandle, 1);
 }
 
 MapDevice& findDeviceByChannel(int channel){
@@ -342,41 +222,51 @@ MapDevice& findDeviceByChannel(int channel){
 void setupWifi() {
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
-  // Configures static IP address
+
   Serial.println("[*] Creating ESP32 WIFI connection");
-  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
-  {
-    Serial.println("STA Failed to configure");
+
+  // Try static IP
+  if (WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+    Serial.println("[+] Static IP configured");
+  } else {
+    Serial.println("[!] Failed to configure static IP, falling back to DHCP");
   }
+
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED)
+  unsigned long startAttemptTime = millis();
+  const unsigned long wifiTimeout = 15000; // 15 seconds
+
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < wifiTimeout) {
     delay(500);
-
-  Serial.print("[+] WiFi connected: ");
-  Serial.println(WiFi.localIP());
-
-  Serial.println("[*] Creating ESP32 AP");
-  if (!WiFi.softAP(soft_ap_ssid, soft_ap_password, channel, hide_SSID, max_connection))
-  {
-      Serial.println("failed to start softAP");
+    Serial.print(".");
   }
-  Serial.print("[+] AP Created with IP Gateway ");
-  Serial.println(WiFi.softAPIP());
-  Serial.print("Soft AP SSID: \"");
-  Serial.print(soft_ap_ssid);
-  Serial.print("\", IP address: ");
-  Serial.println(WiFi.softAPIP());
+  Serial.println();
 
-  if (MDNS.begin("esp32")) Serial.println("MDNS started.");
-  else Serial.println("Error! MDNS not started.");
-}
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("[+] WiFi connected: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("[!] WiFi STA connection failed, continuing with AP only");
+  }
 
-void setupMqtt() {
-  espClient.setCACert(root_ca);
+  // Start AP anyway
+  if (!WiFi.softAP(soft_ap_ssid, soft_ap_password, channel, hide_SSID, max_connection)) {
+    Serial.println("[!] Failed to start softAP");
+  } else {
+    Serial.print("[+] AP Created with IP Gateway ");
+    Serial.println(WiFi.softAPIP());
+    Serial.print("Soft AP SSID: \"");
+    Serial.print(soft_ap_ssid);
+    Serial.print("\", IP address: ");
+    Serial.println(WiFi.softAPIP());
+  }
 
-  mqttClient.setServer(mqtt_server, mqtt_port);
-  mqttClient.setCallback(mqttCallback);
+  if (MDNS.begin("esp32_smart_v4")) {
+    Serial.println("MDNS started. Access with http://esp32_smart_v4.local/");
+  } else {
+    Serial.println("Error! MDNS not started.");
+  }
 }
 
 void asyncWebServerRoutes() {
@@ -385,29 +275,70 @@ void asyncWebServerRoutes() {
     request->send(200, "text/html", index_html);
   });
 
-  server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (request->hasParam("ch")) {
-      int ch = request->getParam("ch")->value().toInt();
+  server.on("/toggle", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("channel")) {
+      int ch = request->getParam("channel")->value().toInt();
 
       if(ch >= 0 && ch < devices.size()) {
         MapDevice& mapDevice = findDeviceByChannel(ch);
 
         toggleDevice(mapDevice);
+
+        String msg = "The device channel: " + String(mapDevice.channel) + " has been changed its state to: " + mapDevice.outputState[0] ? "ON" : "OFF";
+        
+        request->send(200, "text/plain", msg);
+      } else {
+        request->send(404, "text/plain", "Device not found");
       }
+      return;
     }
-    
-    request->send(200, "text/plain", "OK");
+    request->send(400, "text/plain", "Bad Request");
   });
 
   events.onConnect([](AsyncEventSourceClient *client) {
     for (auto& device : devices) {
       for (size_t j = 0; j < device.outputState.size(); j++) {
         char msg[20];
-        sprintf(msg, "ch%d:%s", device.channel, device.outputState[j] ? "ON" : "OFF");
+        sprintf(msg, "channel%d:%s", device.channel, device.outputState[j] ? "ON" : "OFF");
         client->send(msg, "update", millis());
       }
     }
   });
+
+ server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request){
+    String json = "[";
+    for(int i=0; i<devices.size(); i++){
+      json += "{\"channel\":" + String(devices[i].channel) + ",\"name\":\"" + devices[i].name.c_str() + "\",\"outputState\":" + (devices[i].outputState[0] ? "true" : "false") + "}";
+      
+      if(i < devices.size() - 1) {
+        json += ",";
+      }
+    }
+    json += "]";
+    request->send(200, "application/json", json);
+  });
+
+  server.on("/api/device/toggle", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (request->hasParam("channel") && request->hasParam("state")) {
+      int channel = request->getParam("channel")->value().toInt();
+      bool state = request->getParam("state")->value().equalsIgnoreCase("true");
+
+      for(int i=0; i<devices.size(); i++){
+        if(devices[i].channel == channel) {
+          toggleDevice(devices[i], state);
+          String msg = String(devices[i].name.c_str()) + " on channel: " + String(devices[i].channel) + " has change state to: " + String(state ? "ON" : "OFF");
+          request->send(200, "text/plain", msg);
+          return;
+        }
+      }
+
+      request->send(404, "text/plain", "Device not found");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+
+  Serial.println("Rest API Ready");
 
   server.addHandler(&events);
   server.begin();
@@ -416,4 +347,45 @@ void asyncWebServerRoutes() {
 void loop()
 {
   // All logic handled in FreeRTOS tasks
+}
+
+void checkButtons() {
+  for (auto& device : devices) {
+    for (size_t i = 0; i < device.inputPins.size(); i++) {
+      bool reading = digitalRead(device.inputPins[i]);
+
+      if (reading != device.lastButtonState[i]) {
+        device.lastDebounceTime[i] = millis();
+      }
+
+      if ((millis() - device.lastDebounceTime[i]) > DEBOUNCE_DELAY) {
+        if (reading != device.inputState[i]) {
+          device.inputState[i] = reading;
+
+          if (device.inputState[i] == LOW) { // Only trigger on rising edge
+            toggleDevice(device);
+          }
+        }
+      }
+      device.lastButtonState[i] = reading;
+    }
+  }
+}
+
+void setupPins() {
+  for (auto& device : devices) {
+    for (int in : device.inputPins) {
+      pinMode(in, INPUT_PULLUP);
+    }
+    for (size_t i = 0; i < device.outputPins.size(); i++) {
+      pinMode(device.outputPins[i], OUTPUT);
+      digitalWrite(device.outputPins[i], LOW);  // HIGH = OFF by default
+      device.outputState[i] = false;
+    }
+    // Initialize debouncing variables
+    for (size_t i = 0; i < device.inputPins.size(); i++) {
+      device.lastDebounceTime[i] = 0;
+      device.lastButtonState[i] = HIGH; // Assuming pull-up, so button not pressed is HIGH
+    }
+  }
 }

@@ -71,14 +71,8 @@ static void wifi_event_cb(void *arg, esp_event_base_t event_base, int32_t event_
         break;
     case (WIFI_EVENT_STA_DISCONNECTED):
         ESP_LOGI(TAG, "Wi-Fi disconnected");
-        if (wifi_retry_count < WIFI_RETRY_ATTEMPT) {
-            ESP_LOGI(TAG, "Retrying to connect to Wi-Fi network...");
-            esp_wifi_connect();
-            wifi_retry_count++;
-        } else {
-            ESP_LOGI(TAG, "Failed to connect to Wi-Fi network");
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-        }
+        ESP_LOGI(TAG, "Retrying to connect to Wi-Fi network...");
+        esp_wifi_connect();
         break;
     case (WIFI_EVENT_STA_AUTHMODE_CHANGE):
         ESP_LOGI(TAG, "Wi-Fi authmode changed");
